@@ -1,0 +1,608 @@
+---
+title: "Customer Segmentation - A private airline"
+author: "Venkatachalapathy Othisamy"
+date: "date"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(magrittr)
+library(dplyr) #Attaching dplyr library
+library(tidyr) #Attaching tidyr library
+#install.packages("lubridate")
+library(lubridate) #R library to work with date times.
+#install.packages("fastcluster")
+library(fastcluster)
+library(arules)
+library(klaR)
+library(mclust)
+library(dbscan)
+```
+
+## Introduction
+
+This private airline is a unique player in the airline carrier industry has endured the threats of intense competition from large national brands. Started as a charter carrier, it has expanded its business to offer scheduled flight services to various destinations. By 2014, this airline had survived bankruptcies, multiple economic recessions, threats of mergers and was now stable and profitable.
+
+This airline has data representing 1.52 million customers making 1.86 million trips between January 2013 and December 2014.
+
+## Understanding the data
+The original this airline data is in .csv file format. We will use R to preprocess the data and analyze it. The data dictionary is shown below.
+
+| Field | Description |
+|----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| PNRLocatorID | PNR #. This could,be treated as a confirmation number. Multiple flights and segments all roll,up to one PNR #. |
+| TicketNum | Ticket Number - An itinerary may have multiple ticket numbers. |
+| CouponSeqNbr | Sabre assigned,sequence number of the ticket coupon. Values are 1-16; values 5 and greater,are a result of a conjunctive ticket. |
+| ServiceStartCity | Airport code for,the city the flight is leaving from. |
+| ServiceEndCity | Airport code for,the city the flight is landing at. |
+| PNRCreateDate | Date the ticket was,booked |
+| ServiceStartDate | When the flight,takes off |
+| PaxName | First 4 digits of,the passenger last name and the first 2 digits of the passenger 1st name |
+| EncryptedName | Passenger name in,encrypted format. |
+| GenderCode | M for Male and F,for Female |
+| Birthdateid | A unique identifier,that allows you to match birthdates across records without actually providing,the birth date. |
+| Age | Age of the,passenger at the time of the flight. |
+| PostalCode | Postal code of the,location from where the booking was made. |
+| BkdClassOfService | What class of,service (e.g. coach, first class, etc.) the passenger booked |
+| TrvldClassOfService | What class of,service (e.g. coach, first class, etc.) the passenger travelled. This could,be upgraded later in the flight. |
+| BookingChannel | How the passenger,booked the flight. If this is showing a 3 letter code, it's most likely booked, at that airport. UFO is booked in Cancun. |
+| BaseFareAmt | Amount of the base,fare (without taxes) of all segments on the ticket. Under certain,circumstances such as bulk, net, award tickets, this value will be blank. |
+| TotalDocAmt | Total price of this,ticket document including base fare, taxes and fees stated in the,EquivBaseFareCurrCode. In the case of exchanges this amount may be zero or,may only represent the difference in price from the previous ticket amount |
+| UflyRewardsNumber | The rewards number,that was provided when booked. |
+| UflyMemberStatus | The Ufly member,status. It will be either Standard or Elite. |
+| CardHolder | True or False value,if the member is also a credit card holder. |
+| BookedProduct | Free form text,field that is used to put discount codes in |
+| EnrollDate | When the member,enrolled in Ufly rewards |
+| MarketingFlightNbr | Flight Number |
+| MarketingAirlineCode | The Airlines with,which booking was made. We are only interested in "SY" |
+| StopoverCode | O' for Layovers ie,halt in a city for less than 24 hours.'X' for Stopovers that is halt in a,city for more than 24 hours. |
+
+Open the `.csv` data R
+```{r}
+folder="C:/Users/venka/Documents/Fall Semester/Exploratory Data Analysis/airline_data"
+setwd(folder)
+
+data<-read.csv("airline_data.csv") #Data is stored in the dataframe called data
+
+#data_orig <- data
+#sample_rows <- sample.int(nrow(data),100000)
+#data <- data[sample_rows,]
+#write.csv(data,"data_small.csv")
+```
+
+The structure of the data is shown below
+```{r}
+str(data)
+```
+
+Summarizing it
+```{r}
+summary(data)
+```
+
+## Data Preperation
+
+### Data Cleaning
+
+The following are the attributes that need treatment.
+
+| GenderCode and Birthdateid | Remove rows with faulty Gendercode and BirthdateID |
+|----------------------------|----------------------------------------------------|
+| Age                        | Replace faulty values with median value            |
+| UflyRewardsNumber          | Replace NAs with 0                                 |
+| UflyMemberStatus           | Replace Missing values with "non-member"           |
+| Duplicate PNRs             | Remove rows with duplicate PNRs                    |
+| BookingChannel             | Remove rows with city codes as BookingChannel      |
+| Marketing Airline Code     | Remove rows with airline code other than "SY"      |
+| Error PNRs                 | Remove error PNRs                                  |
+
+We need to remove rows with faulty Gendercode and BirthdateID
+```{r}
+#Filtering out records which have NA for BirthdateID
+#same as data <- data %>%filter(!is.na(birthdateid)) 
+data%<>%filter(!is.na(birthdateid)) 
+
+data$GenderCode<-as.character(data$GenderCode)
+data%<>%filter(GenderCode!="")
+
+#Filtering out records which have “” for GenderCode
+data$GenderCode<-as.factor(data$GenderCode)
+```
+
+Replacing faulty values in Age with median value
+```{r}
+#Replacing negative ages with median value
+data$Age[data$Age < 0] <- median(data$Age)
+
+#Replacing age values greater than 120 with median value
+data$Age[data$Age > 120] <- median(data$Age)
+```
+
+Replacing NAs in UflyRewardsNumber with 0
+```{r}
+#Replace NAs with 0
+data$UFlyRewardsNumber[is.na(data$UFlyRewardsNumber)] <- 0
+```
+
+Replacing Missing values in UflyMemberStatus with non-member
+```{r}
+#Convert factor level data to string
+data$UflyMemberStatus<-as.character(data$UflyMemberStatus)
+
+#Replace missing values with “non-ufly” 
+data$UflyMemberStatus[data$UflyMemberStatus==''] <-"non-ufly"
+```
+
+Retaining only those rows which have single occurrence of PNRLocatorID, CouponSeqNbr, PaxName, ServiceStartCity, ServiceEndCity, ServiceStartDate combination.
+```{r}
+data%<>%
+  group_by(PNRLocatorID,CouponSeqNbr,PaxName,ServiceStartCity,ServiceEndCity,ServiceStartDate)%>%
+  filter(n()==1)
+```
+
+Removing rows with faulty city codes as BookingChannel. Some rows have city names for Booking Channel.
+Replacing faulty data with Other
+```{r}
+data$BookingChannel<-as.character(data$BookingChannel)
+data$BookingChannel[data$BookingChannel!="Outside Booking" & 
+                      data$BookingChannel!="SCA Website Booking" & 
+                      data$BookingChannel!="Tour Operator Portal" & 
+                      data$BookingChannel!="Reservations Booking" & 
+                      data$BookingChannel!="SY Vacation"] <- "Other"
+data$BookingChannel<-as.factor(data$BookingChannel)
+```
+
+Removing rows with MarketingAirlineCode code other than SY
+```{r}
+data$MarketingAirlineCode<-as.character(data$MarketingAirlineCode)
+data%<>%filter(MarketingAirlineCode=="SY")
+data$MarketingAirlineCode<-as.factor(data$MarketingAirlineCode)
+```
+
+Creating a new column called error which contains 1 if the PNR is errored or 0 otehrwise.
+Error PNR refers to those which do not start with coupon sequence number 1.
+```{r}
+data%<>%group_by(PNRLocatorID)%>%
+  mutate(error= ifelse(min(CouponSeqNbr)!=1,1,0))
+```
+
+Retaining only the non errored rows and check how many rows are remaining.
+```{r}
+data%<>%filter(error==0)
+nrow(data)
+```
+
+### Data Sampling
+Since the data, after transformation, has 3.2 million rows, we take a sample of the data to perform further analysis to facilitate R to handle the data with ease. Since the data is at the level of one row per flight, just taking a random sample of the rows will distort the trip details. So, we take a sample of the PNRLocatorIDs and retain all the records belonging to the sampled PNRs.
+```{r}
+#Obtain Unique PNRs
+uniquePNRs<-unique(data$PNRLocatorID) 
+
+#To produce the same samples every time the code is run
+set.seed(1234567)
+
+
+sample_PNRs<-sample(uniquePNRs,10000)
+
+#Obtaining data related to the sampled 10,000 PNRs
+sample_data<-data%>%filter(PNRLocatorID %in% sample_PNRs)
+```
+
+
+### Data Transformation
+For the purpose of analysis, attributes are created as a combination of other attributes.
+
+| 1 | UID | Unique ID for every customer |
+|----|------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| 2 | Age Bucket | Bin customer age into 5 age buckets |
+| 3 | True Origin | The starting city of every trip |
+| 4 | Final destination | The ending city of the trip |
+| 5 | True Destination | The actual destination of the trip (City of longest stay) |
+| 6 | Oneway-RoundTrip | 1 if the trip was a round trip and 0 if one way |
+| 7 | Group Size | Size of the group if the trip constituted of more than one passengers. |
+| 8 | Group-Single | 1 if the trip was flown by more than 1 customers and 0 if the trip was flown by a single customer. |
+| 9 | Seasonality | Q1 if travel was made in Jan-Mar Q2 if travel was made in Apr-June Q2 if travel was made in July-Sept Q2 if travel was made in Oct-Dec |
+| 10 | Days Booked in Advance | Number of days between booking and travel |
+
+First, create a Unique ID for each customer by concatenating Encrypted name, GenderCode and birthdateid.
+```{r}
+
+sample_data<-sample_data%>% mutate(uid=paste(EncryptedName,GenderCode,birthdateid,sep=""))
+```
+
+Binning the customers' age into 1 of 5 age buckets
+```{r}
+sample_data%<>%mutate(age_group = 
+                        ifelse(Age>=0 & Age<18,"0-17",
+                               ifelse(Age>=18 & Age < 25,"18-24",
+                                      ifelse(Age>=25&Age<35,"25-34",
+                                             ifelse(Age>=35 & Age<55,"35-54",
+                                                    ifelse(Age>=55,"55+",0)
+                                                    )
+                                             )
+                                      )
+                               )
+                    )
+```
+
+Determining the true Service Start City for each row in the data. It will be the First city from which the trip started
+```{r}
+true_origins<-sample_data%>%
+  arrange(PNRLocatorID,CouponSeqNbr)%>%
+  group_by(PNRLocatorID,PaxName)%>%
+  do(data.frame(true_origin=first(.$ServiceStartCity)))
+
+sample_data<-merge(sample_data,true_origins,
+                   by.x=c("PNRLocatorID","PaxName"),
+                   by.y = c("PNRLocatorID","PaxName"))
+```
+
+Determining where the trip ended. If the trip is a round trip, the service end city (Final Destination) will be the same as the service start city (True Origin)
+```{r}
+final_destination<-sample_data%>%
+  arrange(PNRLocatorID,CouponSeqNbr)%>%
+  group_by(PNRLocatorID,PaxName)%>% 
+  do(data.frame(final_destination=last(.$ServiceEndCity)))
+
+sample_data<-merge(sample_data,final_destination,
+                   by.x=c("PNRLocatorID","PaxName"),
+                   by.y = c("PNRLocatorID","PaxName"))
+```
+
+Determining what was the trips true destination. We assume this was the place where most time was spent on the trip.
+```{r}
+#Convert Service Start date to Date type
+sample_data$ServiceStartDate<-as.Date(sample_data$ServiceStartDate)
+
+#The place of maximum stay during the trip.
+diff1<-sample_data%>%
+  arrange(PNRLocatorID,CouponSeqNbr)%>%
+  group_by(PNRLocatorID,PaxName)%>%
+  mutate(stay=lead(ServiceStartDate)-ServiceStartDate,default=0)%>%
+  select(PNRLocatorID,PaxName,ServiceStartCity,ServiceEndCity,ServiceStartDate,stay)
+
+diff1$stay[is.na(diff1$stay)]<-0
+diff1$stay<-as.numeric(diff1$stay)
+
+true_destination<-diff1%>%
+  group_by(PNRLocatorID,PaxName)%>%
+  do(data.frame(true_destination= first(as.character(.$ServiceEndCity)[.$stay==max(.$stay)])))
+
+sample_data<-merge(sample_data,true_destination,
+                   by.x=c("PNRLocatorID","PaxName"),
+                   by.y = c("PNRLocatorID","PaxName"))
+```
+
+Next, determining if the trip was a one-way or round-trip. The trip is considered a round trip if the service end city (Final Destination) will be the same as the service start city (True Origin).
+```{r}
+sample_data%<>%
+  mutate(round_trip = ifelse(as.character(true_origin)==as.character(final_destination), 1, 0))
+```
+
+Next, determining the group size, the number of people who traveled together in each trip.
+```{r}
+sample_data%<>%
+  group_by(PNRLocatorID)%>%
+  mutate(group_size= length(unique(uid)))
+```
+
+Next, we have a special inidcator if the group-size was 1,i.e., flown by a single customer
+```{r}
+sample_data%<>%
+  group_by(PNRLocatorID)%>%
+  mutate(group= ifelse(group_size>1,1,0))
+```
+
+Next, handling seasonality in terms of quaters. Assign Q1 to Q4 based on the quarter of the year
+in which the trip was made
+```{r}
+sample_data$ServiceStartDate<-as.Date(sample_data$ServiceStartDate)
+#Convert ServiceStartDate from factor to Date format
+sample_data%<>%
+  group_by(PNRLocatorID,PaxName)%>%
+  mutate(seasonality= ifelse(month(ServiceStartDate)>=1 & month(ServiceStartDate)<=3,"Q1",
+                             ifelse(month(ServiceStartDate)>=4 & month(ServiceStartDate)<=6,"Q2",
+                                    ifelse(month(ServiceStartDate)>=7 & month(ServiceStartDate)<=9,"Q3",
+                                           ifelse(month(ServiceStartDate)>=10 & month(ServiceStartDate)<=12,"Q4",0)
+                                           )
+                                    )
+                             )
+         )
+```
+
+Finally, calculating the number of days the ticket was booked in advance. It is the difference between PNRCreateDate and ServiceStartDate
+```{r}
+sample_data$PNRCreateDate <- as.Date(sample_data$PNRCreateDate) 
+sample_data$ServiceStartDate <- as.Date(sample_data$ServiceStartDate)
+sample_data%<>% 
+  mutate(days_pre_booked=as.numeric(floor( difftime(ServiceStartDate,
+                                                    PNRCreateDate,units=c("days")))))
+```
+
+## Customer Segmentation
+We want to use the data to segment customers of this airline into general categories of people with similar flying patterns. The goal is to group the observations in the data into clusters such that every datum in a cluster is more similar to other datums in the same cluster than it is to datums in other clusters.
+
+### Change data granularity
+In order to run the segmentation algorithm, we need to first have the data at the right granularity. Since we are
+looking to segment customers, it is important to bring the data to the granularity of customers. Hence, transforming the data
+such that each row represents a unique customer-PNR combination.
+```{r}
+sample_data%<>%
+  select(PNRLocatorID, uid, PaxName, ServiceStartDate, BookingChannel, TotalDocAmt,
+         UFlyRewardsNumber,UflyMemberStatus, age_group,true_origin,true_destination,
+         round_trip,group_size,group, seasonality,days_pre_booked)
+
+#This may take a considerable amount of time
+customer_data <- sample_data %>%
+  group_by(PNRLocatorID,uid,PaxName) %>%
+  summarise(ServiceStartDate=first(ServiceStartDate),
+            BookingChannel=first(BookingChannel), 
+            avg_amt=max(TotalDocAmt),
+            UFlyRewards=first(UFlyRewardsNumber),
+            UflyMemberStatus=first(UflyMemberStatus),
+            age_group=last(age_group),
+            true_origin=first(true_origin),
+            true_destination=first(true_destination),
+            round_trip=first(round_trip),
+            group_size=first(group_size),
+            group=first(group), 
+            seasonality=last(seasonality), 
+            days_pre_booked=max(days_pre_booked))
+
+#Retaining only those attributes that are meaningful for clustering
+customer_data%<>%
+  select(-PNRLocatorID,-uid,-PaxName,-ServiceStartDate,-UFlyRewards)
+  nrow(sample_data)
+
+  #Granularity of data was reduced to customer level
+  nrow(customer_data)
+
+```
+
+### Units and Scaling
+The initial understanding of the data has shown us that this contains attributes of different units. Units affect what
+clustering algorithms will discover. One way to try to make the clustering more coordinate- free is to transform all 
+the columns to have a value between 0 and 1. This is called Normalization. There are multiple techniques of achieving 
+normalization. We will be using the min-max normalization technique.
+```{r}
+#Min-Max normalization: x= x-max/max-min
+customer_data_t=read.csv("customer_data.csv")
+customer_data=customer_data_t[,-1]
+normalize <- function(x){return ((x - min(x))/(max(x) - min(x)))}
+
+ungrouped <- ungroup(customer_data)
+
+customer_data_km = mutate(ungrouped,
+                     avg_amt = normalize(avg_amt),
+                     days_pre_booked = normalize(days_pre_booked),
+                     group_size=normalize(group_size))
+
+write.csv(customer_data_km,"customer_data_km.csv")
+```
+
+### Clustering algorithm
+Various clustering algorithms can be used to achieve the goal of segmentation
+
+```{r}
+customer_data_fc=data.frame(sapply(customer_data_km[,c("BookingChannel","UflyMemberStatus","age_group","true_origin","true_destination","seasonality")],as.factor))
+customer_data_tmp=data.frame(sapply(customer_data_fc,as.numeric))
+customer_data_nm=cbind(customer_data_km[,c(4,9,10,11,13)],customer_data_tmp)
+customer_data_norm=sapply(customer_data_nm[,-1],FUN = normalize)
+
+```
+
+```{r}
+#Calculating Gower distance
+
+#Converting columns to Factor variables
+customer_data_fc=data.frame(sapply(customer_data_km[,c("BookingChannel","UflyMemberStatus","age_group","true_origin","true_destination","seasonality","group","round_trip")],as.factor))
+
+customer_data_nm=cbind(customer_data_km[,c(4,10,13)],customer_data_fc)
+library(cluster)
+memory.limit(size = 1000000)
+```
+
+```{r}
+#Performing hierarchial clustering
+gower_dist=daisy(customer_data_nm, metric = "gower")
+customer_hcl=hclust(gower_dist,method="ward.D2")
+
+#plot
+plot(customer_hcl,hang=0,label=F,main="Cluster Dendogram")
+
+travel_groups = cutree(customer_hcl,5)
+customer_num_agg = aggregate(customer_data_km[,c(4,10,13)],list(travel_groups),median)
+
+#Calculating mode
+getmode <- function(x) {
+     ux <- unique(x)
+     ux[which.max(tabulate(match(x, ux)))]
+ }
+customer_data_ch= data.frame(sapply(customer_data_km[,c("BookingChannel","UflyMemberStatus","age_group","true_origin","true_destination","seasonality","group","round_trip")],as.character))
+
+customer_cat_agg = aggregate(customer_data_ch,list(travel_groups),FUN=getmode)
+
+travel_group_characteristcs=merge(customer_cat_agg,customer_num_agg)
+travel_group_characteristcs
+
+sil_hclust=silhouette(travel_groups,gower_dist)
+summary(sil_hclust)
+```
+
+```{r}
+#Performing PAM clustering
+library(fpc)
+kmed<-pam(gower_dist,8)
+
+sil_pam=silhouette(kmed,gower_dist)
+summary(sil_pam)
+
+
+
+```
+
+```{r}
+#Performing k-modes clustering
+customer_data_modes=customer_data
+#Creating bins to perform k-modes
+
+get_amt_bins <- function(x) {
+     if (x<164){'100-164'}
+  else if (x>164 & x<278){'165-275'}
+  else if (x>278 & x<389){'276-400'}
+  else ('>400')
+}
+
+get_days_bins <- function(x) {
+     if (x<20){'1-20'}
+  else if (x>20 & x<50){'21-50'}
+  else if (x>51 & x<80){'51-80'}
+  else ('>80')
+   }
+
+customer_data_modes$avg_amt=t(data.frame(lapply(customer_data[,4],get_amt_bins)))
+
+customer_data_modes$days_pre_booked=t(data.frame(lapply(customer_data$days_pre_booked,get_days_bins)))
+
+customer_modes_factor=data.frame(sapply(customer_data_modes[,-c(1,2)],as.factor))
+
+customer_kmodes=kmodes(customer_modes_factor,8)
+
+#Calculating Gower distance for the pruned dataset
+gower_dist_modes=daisy(customer_modes_factor, metric = "gower")
+
+sil_kmodes=silhouette(customer_kmodes$cluster,gower_dist_modes)
+summary(sil_kmodes)
+
+```
+
+
+```{r}
+kmed_binned<-pam(gower_dist_modes,8)
+
+sil_pam_binned=silhouette(kmed_binned,gower_dist_modes)
+summary(sil_pam_binned)
+
+```
+
+### Visualizing the Clusters
+Now that the data is divided into clusters, we can interpret the clusters by summarizing the data within each cluster. We can visualize differences between clusters in Ufly membership, one way vs round trips, group size, seasonality, booking channel, amount spent, days pre booked.
+```{r}
+#k-modes clustering
+plot(customer_data_nm[,c(1,3:9)], col = (kmed$clustering), main = "K medoids clustering",pch = 20, cex = 2)
+
+#hierarchical clustering
+plot(customer_data_nm[,c(1,3:9)], col = (travel_groups), main = "Hierarchical clustering",pch = 20, cex = 2)
+
+#k-medoids clustering
+plot(customer_data_nm[,c(1,3:9)], col = (customer_kmodes$cluster), main = "K-modes clustering",pch = 20, cex = 2)
+```
+
+## Overview
+### Data Engineering
+The data obtained from the airline is not useful as such. But I made the data useful by doing the below steps. Also mentioned below are the reasons to do the same.
+
+__Filtering out data:__
+The data we received from This private airline is at flight level. The data also contains the trips in various flights other than the concerned airline. But we are interested in this private airline flight details. Hence we need to filter the data. 
+
+__Cleaning the data__
+
+__Scenario to filter out the data:__
+The data contains many missing values and data entry errors. We need to fix thohse errors. For example, the birth date and gender of passengers have many missing values. For this, filtering out the columns is the best method as we cannot randomnly put the values for the birth date and gender.
+
+There are data entry errors in Custoemr Age. In order to make the segmentation useful, filtering out the instances which have unusual number as age is logical.
+
+__Scenario to make business assumptions.__
+In order to make the dataset more useful, filtering out instances based on all the columns will result in losing too much data. Hence, we did make certain assumptions about the missing values of few attributes. For instance, for missing valaues in Ufly member status, we assumed that the passenger corresponding to that row is not a memeber of Ufly program and assigned the status as 'Non-member'.
+
+In other case, if the rewards Number is 0, then we assumed that the passenger was not provided with rewards number and hence assigned the value of 0 to that passenger.
+
+__Data duplication:__
+The data might contain duplicate entries of same customer making the same trip. Hence we removed the duplicate entries by retaining only the rows, which have unique PNR,sequence number, Customer Name and so on.
+
+__Transforming the level of data:__
+In order to gain insights about customers and their travelling patterns, we need to segment them according to the trips they made with the airline. 
+We can do it using unsupervised machihne learning. But for that we need data on Customer level. But we have data at flights level. For e.g. if a customer takes flight from Minneapolis to NewYork via Chicago, the data has one row for flights form Minneapolis to Chicago and one row for the filght from Chicago to NewYork. But ultimately, the goal is to segment the customers. Hence, we need to transform the data from flight level to Customer level.
+Also we would want to know whether each customer  travelled in groups.
+
+*For that, we need to know where the customer flied to and from which place. This will give us more insights on where really the customers are heading to on which occasions. We also need tot know whether customer made round trip or a single trip ass this will give more information about each customer.
+Also, dates are too granular and it is impossible to comapare the flight patterns on each date in a year. Hence, we can group the dates into quarters.*
+
+__Binning data:__
+There are many attributes which will contian lots of continuous values such as age. But segmentation characterisitcs will give mean/median of each cluster, which might not give useful information about that cluster. In order to make the cluster more meaningful, we can bin the age into 4/5 groups.
+
+*Most of the segmentation algorithms use distance metrics to calculate similarity. But the data is in different units and scale. Hence we normalized the dataset.*
+
+*Finally, we need data on customer level. For that, each row of the final data should contian a single row for each customer. This is acheived by agrregating each of the above discussed attributes on a customer-PNR level.*
+
+### Segmentation
+
+   We can segment the customer using different clustering algorithms. The dataset contains few numerical and many categorical data. 
+
+Hence the k-means algorithm cannot be used as it is designed to handle numerrical data. I used k-medoids,kmodes and hierarchical clustering methods to segment the customers.
+
+Kmedoids and hierarchcal clustering algorithm accepts similarity matrix. Getting the similarity matrix became challenge, as the distance needs to be calculated between numerical and categorical variables. I used Gower distance formula to accomplish this.
+
+In Hierarchical clustering method, I used ward distance to calcualte the distance. Based ont he dendogram, I cut the tree to give five clusters. Then, I calculated median for numerical variables belonging to each cluster and mode for categorical variables.
+
+In k-medoids algorithm, I initially used 5 clusters.  But the silhouette co-efficient for 5 clusters did not come good. Hence I increased the cluster number to 8, which increased the silhouette co-efficient. But the resultant co-efficient is still less than the hierarchical clustering.
+
+I tried k-modes algorithm. For k-modes algorithm, I created bins for average amount spent and number of days pre booked.Iagain used 8 clusters for k-modes algorithm as it gave the best result among k-modes. Then I tried k-modes without binning which did not improve the silhouette co-efficient much.
+
+Then, I used the binned dataset in k-medoids algorithm, which did not improve the clustering performance much ass well.
+
+I did not use Gaussian mixture modelling as it accepts only the numerical variables. Converting categorical to numerical variables to calculate the distance did not make business sense as we do not know the weight of each categorical variables.
+
+### Visualization
+    
+    ```{r}
+by_booking_channel=customer_data%>%group_by(BookingChannel)%>%summarise(sum(avg_amt))
+by_booking_channel=setNames(by_booking_channel,c("Booking_channel","sum_of_AVG_amount"))
+
+#g1<-ggplot(customer_data)+aes(customer_data$days_pre_booked,customer_data$avg_amt)+geom_point(pch=15,color=kmed_binned$clustering,size=1)
+#g1
+```
+In the first plot, seasonality vs trip count is shown. This shows that, the number of trips from in the quarter 2 is less when compared to other quarters. Hence we need to take steps to increase the trips in Q2.
+```{r}
+g1=ggplot(data=customer_data,aes(x=seasonality))+geom_bar()
+g1
+```
+
+The below second plot shows that Elite members have very less number of trips when compared to standard class members.
+This is usual, but the elite memberrship count is very low. Hence, steps need to be taken to increase the elite membership.
+```{r}
+g2=ggplot(data=customer_data,aes(x=UflyMemberStatus))+geom_bar()
+g2
+```
+The below plot shows the distribution of amount spending based on the age group. Most of the people who belong to age-group of 18-24 spends around $200, whereas most of the people in both ends of the spectrum $300. We can see that, the number of people who spends more than $500 as average amount reduces drastically. Hencec steps need to be taken to increase customer engagement and customer spending.
+```{r}
+g3=ggplot(data=customer_data, aes(x=avg_amt, fill=age_group)) + geom_density(alpha=.4)
+g3
+```
+The below plot shows the total average amount per booking channel. Here, we can see that SCA weebsite booking contributes highest to the total amount of spending by customers. This means that the SCA website is very popular among the customers. We need to maintain this trend by giving importance to the compaany website.
+
+```{r}
+ggplot(by_booking_channel,aes(x=Booking_channel,y=sum_of_AVG_amount))+ geom_point(position = 'jitter',color='blue',alpha=.5) +geom_line(aes(colour = sum_of_AVG_amount, group = sum_of_AVG_amount))
+```
+The below plot shows that people are spending more on Q4, which is expected due to holiday seasons. But whwn we look at the count, the number of trips is not the highest in Q4. This means that, less people travel by our airline but they spend more. This shows that the airline's ticket price is costlier when compared to other airlines. Hence less people choose our airline. We may need to dig deeper into ticket price during hoolidays in Q4.
+```{r}
+g4=ggplot(data=customer_data, aes(x=avg_amt, fill=seasonality)) + geom_density(alpha=.4)
+g4
+```
+### Power lies in simply understanding and exploring the data
+
+__Building correct models:__
+Extracting business sense out of the data is the first step towrads building accurate models. Understanding the dataset means we can transform the data to a level, which will make complete business sense. For eg, in the current dataset, we wanted to segment the customers based on the trips they undertook. After we understood the dataset, we aggregated the data to customer level. If we do not study the data enough and its granularity, we might end up building completely worng models. Hence, understanding the data is very essential in building the correct models.
+
+__Attribute selection:__
+Also, once we get a deeper understanding of data, we will get to know the features that will be important in modelling in the later stages. Also, we will know the attributes that doesn't make business sense. We can remove those useless attributes. Hence after understanding the data, we will end up with a firm feature set which will help in reducing the modelling complexity.
+
+__Efficiency:__
+By taking a deeper look into the data, we may come to know about the attributes which are not required for the models with its granular information. The best example for this that I could think of from the current dataset is travelling date. For segmentation and modelling, the models do not require the information of each date. We can either group the dates at week/month/quarterky level depending upon the need. This will make the model work more efficiently on the dataset without loosing too much information.
+
+### The downside of focusing too much on fancy models
+One big advantages of fancy models is the underlying assumptions it amke while processing the data. Not caring about the underlying assumption to the minute detail will result in applying wrong models to the dataset which ultimately results in inaccurate results.
+
+If results are not obtained correctly in one model, moving to other fancy models without analysinng the underlying reasons will not help. The sample size of the data might not be good enough or it might be due to some other reasons. In that case, applyng fancy models will  not improve the results.**
+    
