@@ -11,6 +11,7 @@ Steps involved:
 <li>Data tranformation</li>
 <li>Binning</li>
 <li>Categorization of variables</li>
+<li>Data sampling</li>
 
 ## Clustering
 Discussions on why different algorithms are used and not used
