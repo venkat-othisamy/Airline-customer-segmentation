@@ -18,5 +18,5 @@ Discussions on why different algorithms are used and not used
 ## Visualization
 Visualized clusters based on all variables. <strong>Did not focus on visualizing clusters based on the relationship between two variables</strong>
 
-## Technical overview
+## Technical overview and discussion
 An overview of the entire project
