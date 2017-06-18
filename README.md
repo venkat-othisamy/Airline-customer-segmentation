@@ -16,7 +16,7 @@ Steps involved:
 Discussions on why different algorithms are used and not used
 
 ## Visualization
-Visualizing clusters based on all variables. <strong>Did not focus on visualizing clusters based on the relationship between two variables</strong>
+Visualized clusters based on all variables. <strong>Did not focus on visualizing clusters based on the relationship between two variables</strong>
 
 ## Technical overview
 An overview of the entire project
