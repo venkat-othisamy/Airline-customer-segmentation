@@ -1,4 +1,4 @@
-# airline-customer-segmentation
+# Airline customer segmentation
 
 This project is primarily focussed on data wrangling to do clustering.<br> 
 
